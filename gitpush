@@ -1,0 +1,25 @@
+message=""
+
+if [ "$#" -eq 0 ]; then
+  message="chore: (repo) Automatic commit."
+elif [ "$#" -eq 1 ]; then
+  message="$1"
+else
+  type="$1"
+  subject="$2"
+  desc=""
+  shift 2
+  for i in "$@"; do
+    if [ "$desc" ]; then   
+      desc+=" "
+    fi
+    desc+="$i"
+  done
+  message="$type: ($subject) $desc"
+fi
+
+git add .
+git commit -m "$message"
+git push
+clear
+git status

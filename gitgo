@@ -1,0 +1,11 @@
+#!/bin/bash
+
+read -p 'Type: ' TYPE
+read -p 'Subject: ' SUBJECT
+read -p 'Message: ' MESSAGE
+
+git add .
+git commit -m "${TYPE}: (${SUBJECT}) ${MESSAGE}"
+git push
+clear
+git status

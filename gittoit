@@ -1,0 +1,8 @@
+#!/bin/bash
+
+NEW_BRANCH_NAME=$1
+
+git checkout -b $NEW_BRANCH_NAME
+git push -u origin $NEW_BRANCH_NAME
+clear
+git status

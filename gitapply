@@ -1,0 +1,52 @@
+#!/bin/bash
+
+message=""
+
+# Function to extract the first removed TODO and format the commit message
+generate_todo_message() {
+  # Detect removed TODOs from staged changes
+  local first_todo=$(git diff --cached -U0 | grep -E '^\-\s*.*TODO' | sed -E 's/^-\s*.*TODO[: ]*//' | head -n 1)
+  
+  if [ -n "$first_todo" ]; then
+    # Extract the file name
+    local file_name=$(git diff --cached --name-only | head -n 1 | sed -E 's/\.[^.]+$//' | sed 's|/| |g')
+    # Generate a single-line commit message
+    echo "fix: (${file_name:-repo}) $first_todo"
+  else
+    echo ""
+  fi
+}
+
+# Automatically add all changed files
+git add .
+
+if [ "$#" -eq 0 ]; then
+  # Default commit message
+  todo_message=$(generate_todo_message)
+  
+  if [ -n "$todo_message" ]; then
+    message="$todo_message"
+  else
+    message="chore: (repo) Automatic commit."
+  fi
+elif [ "$#" -eq 1 ]; then
+  message="$1"
+else
+  type="$1"
+  subject="$2"
+  desc=""
+  shift 2
+  for i in "$@"; do
+    if [ "$desc" ]; then   
+      desc+=" "
+    fi
+    desc+="$i"
+  done
+  message="$type: ($subject) $desc"
+fi
+
+# Perform git operations
+git commit -m "$message"
+git push
+clear
+git status
