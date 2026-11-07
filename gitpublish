@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: gitpublish [--name NAME] [--public | --private]
+
+Create a GitHub repository from the current Git project and push its commits.
+The default name is the project folder; the default visibility is private.
+NAME may be a repository name or OWNER/REPO.
+Requires Git, the GitHub CLI (gh), and an existing Git commit.
+EOF
+}
+
+repo_name=''
+visibility='--private'
+
+while (( $# > 0 )); do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -n|--name)
+      if (( $# < 2 )) || [[ -z "$2" ]]; then
+        printf 'Missing value for %s\n' "$1" >&2
+        exit 1
+      fi
+      repo_name="$2"
+      shift 2
+      ;;
+    --name=*)
+      repo_name="${1#--name=}"
+      if [[ -z "$repo_name" ]]; then
+        printf 'Missing repository name\n' >&2
+        exit 1
+      fi
+      shift
+      ;;
+    --public|--private)
+      visibility="$1"
+      shift
+      ;;
+    *)
+      printf 'Unknown argument: %s\n' "$1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+for command_name in git gh; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    printf 'Missing required command: %s\n' "$command_name" >&2
+    exit 1
+  fi
+done
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  printf 'Not inside a Git repository. Run gitnew first.\n' >&2
+  exit 1
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd -- "$repo_root"
+
+if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+  printf 'Nothing to push. Create an initial Git commit first.\n' >&2
+  exit 1
+fi
+
+if git remote get-url origin >/dev/null 2>&1; then
+  printf 'Remote origin already exists. Refusing to create another repository.\n' >&2
+  exit 1
+fi
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  printf 'Warning: uncommitted changes will not be pushed.\n' >&2
+fi
+
+repo_name="${repo_name:-${repo_root##*/}}"
+gh repo create "$repo_name" "$visibility" --source=. --remote=origin --push
