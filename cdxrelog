@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# Switch Codex accounts, then resume a local session from either account.
+# Never edits Codex's session files, credentials, or indexes.
+set -euo pipefail
+
+mode="${1:-}"
+case "$mode" in
+  ""|--switch-only|--resume-only|--latest) ;;
+  -h|--help)
+    cat <<'HELP'
+Usage: cdxrelog [option]
+  (no option)     Switch ChatGPT account, then choose a local Codex session
+  --switch-only   Switch accounts without opening a session
+  --resume-only   Choose a session without switching accounts
+  --latest        Switch accounts and resume the newest local session
+HELP
+    exit 0
+    ;;
+  *) printf 'Unknown option: %s\n' "$mode" >&2; exit 2 ;;
+esac
+
+if [[ "$mode" != "--resume-only" ]]; then
+  codex logout
+  # An absent/stopped daemon is not an error.
+  codex app-server daemon stop >/dev/null 2>&1 || true
+  codex login
+fi
+
+if [[ "$mode" == "--switch-only" ]]; then
+  exit 0
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  printf 'Python 3 is required for the cross-account session picker.\n' >&2
+  exit 1
+fi
+
+exec 3<&0  # Preserve the terminal input; Python receives its source via stdin.
+session_id="$(python3 - "$mode" <<'PY'
+import json
+import os
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+
+mode = sys.argv[1]
+home = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
+root = home / "sessions"
+pattern = re.compile(
+    r"([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})"
+    r"(?:_[0-9a-f-]+)?\.jsonl(?:\.zst)?$",
+    re.IGNORECASE,
+)
+
+if not root.is_dir():
+    print(f"No Codex sessions directory found at {root}", file=sys.stderr)
+    sys.exit(0)
+
+files = []
+for path in root.rglob("rollout-*.jsonl*"):
+    if path.is_file() and (path.name.endswith(".jsonl") or path.name.endswith(".jsonl.zst")):
+        try:
+            files.append((path.stat().st_mtime, path))
+        except OSError:
+            pass
+files.sort(key=lambda x: x[0], reverse=True)
+
+
+def load_entry(mtime, path):
+    fallback = pattern.search(path.name)
+    sid = fallback.group(1) if fallback else None
+    cwd = ""
+    preview = "(no message preview)"
+    source = None
+    # Cold session files can be zstd-compressed by Codex. Their UUID is still
+    # in the filename; we don't need a decompression dependency to resume them.
+    if path.name.endswith(".jsonl"):
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                for i, line in enumerate(stream):
+                    if i >= 200:
+                        break
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = item.get("payload") or {}
+                    typ = item.get("type")
+                    if typ == "session_meta":
+                        sid = payload.get("id") or sid
+                        cwd = payload.get("cwd") or ""
+                        source = payload.get("source")
+                        if isinstance(source, dict) and "subagent" in source:
+                            return None
+                        if payload.get("thread_source") in ("subagent", "guardian_review"):
+                            return None
+                    elif typ == "event_msg" and payload.get("type") == "user_message":
+                        preview = payload.get("message") or preview
+                        break
+                    elif typ == "response_item" and payload.get("role") == "user":
+                        content = payload.get("content") or []
+                        if isinstance(content, list):
+                            for part in content:
+                                if isinstance(part, dict) and part.get("type") == "input_text":
+                                    preview = part.get("text") or preview
+                                    break
+                        if preview != "(no message preview)":
+                            break
+        except (OSError, UnicodeError):
+            pass
+    elif path.name.endswith(".jsonl.zst"):
+        preview = "(compressed history)"
+    if not sid:
+        return None
+    preview = " ".join(str(preview).split())[:68]
+    project = Path(cwd).name if cwd else "unknown project"
+    return (str(sid), mtime, project, preview, cwd)
+
+
+rows = []
+seen = set()
+# Scan extra recent files in case there are sub-agent or duplicate rollouts.
+for mtime, path in files[:500]:
+    entry = load_entry(mtime, path)
+    if entry and entry[0] not in seen:
+        rows.append(entry)
+        seen.add(entry[0])
+        if len(rows) >= 30:
+            break
+
+if not rows:
+    print("No resumable local sessions were found.", file=sys.stderr)
+    sys.exit(0)
+
+if mode == "--latest":
+    print(rows[0][0])
+    sys.exit(0)
+
+print("\nRecent Codex sessions (BOTH ChatGPT accounts):", file=sys.stderr)
+for n, (sid, mtime, project, preview, cwd) in enumerate(rows, 1):
+    when = datetime.fromtimestamp(mtime).strftime("%b %d %H:%M")
+    print(f"{n:2}) {when} | {project[:24]:24} | {preview}", file=sys.stderr)
+
+print("\nResume session number [1], or 0 to skip: ", end="", file=sys.stderr, flush=True)
+try:
+    try:
+        with open("/dev/tty", "r") as tty:
+            answer = tty.readline().strip()
+    except OSError:
+        # Also works when launched from a script or an IDE without /dev/tty.
+        with os.fdopen(3, "r", closefd=False) as terminal_input:
+            answer = terminal_input.readline().strip()
+except OSError:
+    print("No terminal input; use --latest to auto-resume.", file=sys.stderr)
+    sys.exit(0)
+
+if answer == "0":
+    sys.exit(0)
+if not answer:
+    answer = "1"
+try:
+    choice = int(answer)
+except ValueError:
+    print("Invalid selection; nothing resumed.", file=sys.stderr)
+    sys.exit(0)
+if 1 <= choice <= len(rows):
+    print(rows[choice - 1][0])
+else:
+    print("Invalid selection; nothing resumed.", file=sys.stderr)
+PY
+)"
+
+if [[ -n "$session_id" ]]; then
+  exec codex resume "$session_id"
+fi
